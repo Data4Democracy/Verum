@@ -12,37 +12,12 @@ class VHRSpider(scrapy.Spider):
         A spider that crawls a reps voting history
         """
         self.URL_PATTERN = "sSession=([1-3][0-9]{3}\w\d|[1-3][0-9]{3})&sChamber=(\w){1}&nUserID=(\d+)"
-        self.NAME_PATTERN = "Vote History: Representative (\w+, \w|\w+-\w+|\w+)"
-        self.DISTRICT_PATTERN = "District (\d+)"
         self.EXTRA_SESSION_PATTERN = "(\d+) (\w+)"
         self.YEAR_SESSION_PATTERN = "([1-3][0-9]{3})-([1-3][0-9]{3})"
-        self.MOTION_PATTERN = "(A\d|Motion \d+|Suspend Rules|R\d+|M\d+|C RPT)"
-        self.READING_PATTERN = "(2nd Reading|Second Reading|Third Reading|3rd Reading)"
-        self.MOTION_NAME_PATTERN = "A\d+ (\w+, \w.|\w+)"  # Assumes A only
-        self.BILL_ID_PATTERN = "&BillID=(\w+)"
+
         self.REP_REGEX = "sSession=\w+&sChamber=H&nUserID=\w+|sSession=\w+&sChamber=S&nUserID=\w+"
 
         self.NAME_DISTRICT_PATTERN = "Vote History: (Senator|Representative)(.*) (?:\((District [0-9]+)\))"
-        # Dict of lookup words to convert words like 'First' to 1
-        self.word_to_num = {
-            "first": 1,
-            "second": 2,
-            "third": 3,
-            "fourth": 4,
-            "fifth": 5,
-            "sixth": 6,
-            "seventh": 7,
-            "eighth": 8,
-            "ninth": 9,
-            "tenth": 10,
-        }
-
-        self.readings = {
-            '2nd Reading': 2,
-            'Second Reading': 2,
-            'Third Reading': 3,
-            '3rd Reading': 3,
-        }
 
         self.base_url = "http://www.ncleg.net"
         self.rep_vote = []
@@ -137,7 +112,6 @@ class VHRSpider(scrapy.Spider):
             name_title = match_name_district.group(1).strip()
             short_name = match_name_district.group(2).strip()
             district = match_name_district.group(3).strip()
-            print(name_title)
         except:
             #If there is no voter data available, fill with empty strings		
             name_title = ''		

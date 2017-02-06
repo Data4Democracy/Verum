@@ -1,5 +1,6 @@
 import scrapy
 import re
+import pandas as pd
 from ncleg.items import VoteHistory
 
 class VHRSpider(scrapy.Spider):
@@ -11,128 +12,87 @@ class VHRSpider(scrapy.Spider):
         A spider that crawls a reps voting history
         """
         self.URL_PATTERN = "sSession=([1-3][0-9]{3}\w\d|[1-3][0-9]{3})&sChamber=(\w){1}&nUserID=(\d+)"
-        self.NAME_PATTERN = "Vote History: Representative (\w+, \w|\w+-\w+|\w+)"
-        self.DISTRICT_PATTERN = "District (\d+)"
         self.EXTRA_SESSION_PATTERN = "(\d+) (\w+)"
         self.YEAR_SESSION_PATTERN = "([1-3][0-9]{3})-([1-3][0-9]{3})"
-        self.MOTION_PATTERN = "(A\d|Motion \d+|Suspend Rules|R\d+|M\d+|C RPT)"
-        self.READING_PATTERN = "(2nd Reading|Second Reading|Third Reading|3rd Reading)"
-        self.MOTION_NAME_PATTERN = "A\d+ (\w+, \w.|\w+)"  # Assumes A only
-        self.BILL_ID_PATTERN = "&BillID=(\w+)"
-        self.REP_REGEX = "sSession=\w+&sChamber=H&nUserID=\w+|sSession=\w+&sChamber=S&nUserID=\w+"
-        # Dict of lookup words to convert words like 'First' to 1
-        self.word_to_num = {
-            "first": 1,
-            "second": 2,
-            "third": 3,
-            "fourth": 4,
-            "fifth": 5,
-            "sixth": 6,
-            "seventh": 7,
-            "eighth": 8,
-            "ninth": 9,
-            "tenth": 10,
-        }
 
-        self.readings = {
-            '2nd Reading': 2,
-            'Second Reading': 2,
-            'Third Reading': 3,
-            '3rd Reading': 3,
-        }
+        self.REP_REGEX = "sSession=\w+&sChamber=H&nUserID=\w+|sSession=\w+&sChamber=S&nUserID=\w+"
+
+        self.NAME_DISTRICT_PATTERN = "Vote History: (Senator|Representative)(.*) (?:\((District [0-9]+)\))"
 
         self.base_url = "http://www.ncleg.net"
         self.rep_vote = []
         self.rep_info = []
         self.bill_info = []
+        self.rep_parsed = []
 
     def start_requests(self):
-        # urls = ['http://www.ncleg.net/Legislation/voteHistory/voteHistory.html']
-        # for url in urls:
-        #     yield scrapy.Request(url=url, callback=self.parse_vote_history_list)
+        yield scrapy.Request(url=self.base_url, callback=self.get_available_sessions)
 
-        #TESTING CRAWL FOR SPECIFIC SESSION
-        test_urls = ['http://www.ncleg.net/gascripts/voteHistory/MemberVoteHistory.pl?sSession=2007&sChamber=H']
-        for url in test_urls:
+    def get_available_sessions(self, response):
+        #Get available sessions from dropdown on masthead, fetch all data for each session.
+        session_names = response.css('#MastheadBar select[name="Session"] > option::text').extract()
+        session_ids = response.css('#MastheadBar select[name="Session"] > option::attr(value)').extract()
+        return self.get_members_for_session(session_ids)
+        
+    def get_members_for_session(self, session_ids):
+        chambers = ['H','S']
+
+        #Don't fetch data earlier than begin_year
+        begin_year = 2007
+
+        member_history_base = self.base_url + '/gascripts/voteHistory/MemberVoteHistory.pl?sSession={}&sChamber={}'
+        
+        #For each session ID, fetch house and senate data.
+        member_history_urls = [member_history_base.format(session, chamber) for session in session_ids for chamber in chambers if int(session[:4]) >= begin_year]
+        
+        for url in member_history_urls[1:2]:
             yield scrapy.Request(url=url, callback=self.parse_find_reps_session)
 
-
-    def parse_vote_history_list(self, response):
-        house_list = []
-        senate_list = []
-        all_urls = response.xpath("""//*[contains(@href, 'a')]/@href""").extract()
-
-        house_vote_regex = "MemberVoteHistory.pl\?sSession=\w+&sChamber=H|MemberVoteHistory.pl\?sSession=\w+&sChamber=S"
-        senate_vote_regex = "MemberVoteHistory.pl\?sSession=\w+&sChamber=S"
-        base_votehist_url = "http://www.ncleg.net/gascripts/voteHistory/"
-
-        #find matching urls
-        for item in all_urls:
-            house_partial_result = re.search(house_vote_regex, item)
-            senate_partial_result = re.search(senate_vote_regex, item)
-            if house_partial_result:
-                house_list.append(base_votehist_url + house_partial_result.group(0))
-            if senate_partial_result:
-                senate_list.append(base_votehist_url + senate_partial_result.group(0))
-
-        for href in house_list:
-            yield scrapy.Request(url=href, callback=self.parse_find_reps_session)
-
     def parse_find_reps_session(self, response):
-        #grabs all hrefs on the site
-        all_urls = response.xpath("""//*[contains(@href, 'a')]/@href""").extract()
-        found_rep = []
-        base_url = "http://www.ncleg.net/gascripts/voteHistory/MemberVoteHistory.pl?"
+        #Find the list of Representatives
+        all_urls = response.css('#mainBody > ul > li > a::attr(href)').extract()
 
-        #Out of all the urls found, regex search for ones that match the rep_regex,
-        #then parse the vote history
+        #For each representative fetch vote history.
         for url in all_urls:
-            result = re.search(self.REP_REGEX, url)
-            if result:
-                full_url = base_url + result.group(0)
-                yield scrapy.Request(url=full_url, callback=self.parse_rep_vote_history)
+            full_url = self.base_url + url
+            yield scrapy.Request(url=full_url, callback=self.parse_rep_vote_history)
+
 
     def parse_rep_vote_history(self, response):
-        #Some reps did not vote during a session. Test for the "Vote data is unavailable.
-        #We capture the base information about the rep for later matching
-        if "Vote data is unavailable" in response.xpath("""//*[@id="mainBody"]/text()""").extract()[3]:
+        # Some reps did not vote during a session. Test for the "Vote data is unavailable.
+        # We capture the base information about the rep for later matching
+        if "Vote data is unavailable" in response.css("#mainBody::text").extract()[3]:
             cur_url = response.url
             session_id, chamber, rep_id = self.get_session_chamber_rep_id(cur_url)
             url = cur_url
             self.rep_info.append([rep_id, session_id, chamber])
+        
         #Otherwise, we process the body of text.
         else:
-            table_rows = response.xpath('//*[@id="mainBody"]/table[1]/tr')
-            cur_url = response.url
             title = response.xpath("""//*[@id="title"]/text()""").extract_first()
-            #First row of the table is the headers. Don't need those
-            items = []
-            for row in table_rows[1:]:
-                item = VoteHistory()
-                item['session'], item['chamber'], item['rep_id'] = self.get_session_chamber_rep_id(cur_url)
-                item['recess'] = row.xpath("td[1]/text()").extract_first()
-                item['doc_href'], item['doc_num'] = self.get_doc_num_href(row)
-                item['rep_short_name'], item['district'] = self.get_name_district(title)
-                item['recess'] = row.xpath("td[1]/text()").extract_first()
-                item['doc_href'], item['doc_num'] = self.get_doc_num_href(row)
 
-                # Not all subjects have motions. Subjects and motions get mixed up.
-                # Need to build a tester for processing data
-                item['subject_motion'] = row.xpath("td[3]/text()").extract()
-                item['timestamp'] = row.xpath("td[4]/text()").extract_first()
-                item['vote'] = row.xpath("td[5]/text()").extract_first()
+            rep_title, rep_short_name, rep_district = self.get_name_district(title)
+            #Fetch the main table - they use nested tables, so have to use a direct reference.
+            table_rows = response.css('#mainBody > table').extract()[0]
+            
+            #Parse the html table and select relevant info for the vote.
+            pd_table = pd.read_html(table_rows, header=0, match="Doc.", attrs={'cellspacing':0})[0][['RCS\xa0#', 'Doc.','Vote','Result']]
+            
+            #Get session and chamber id from URL and assign to each row
+            cur_url = response.url
+            session_id, chamber, rep_id = self.get_session_chamber_rep_id(cur_url)
+            pd_table['session_id'] = session_id
+            pd_table['chamber'] = chamber
+            pd_table['rep_id'] = rep_id
+            pd_table['rep_title'] = rep_title
+            pd_table['rep_short_name'] = rep_short_name
+            pd_table['district'] = rep_district
 
-                # Subject/Motion Information for Validation
-                item['aye_tot'] = row.xpath("td[6]/text()").extract_first()
-                item['no_tot'] = row.xpath("td[7]/text()").extract_first()
-                item['no_vote_tot'] = row.xpath("td[8]/text()").extract_first()
-                item['excused_abs_tot'] = row.xpath("td[9]/text()").extract_first()
-                item['excused_vote_tot'] = row.xpath("td[10]/text()").extract_first()
-                item['tot_votes'] = row.xpath("td[11]/text()").extract_first()
-                item['result'] = row.xpath("td[12]/text()").extract_first()
-                #item['reading'], item['motion'], item['motion_name'] = self.get_reading_motion(subject_motion)
-                items.append(item)
-            return items
+            #Reorder columns
+            pd_table = pd_table.reindex_axis(['session_id', 'chamber', 'rep_id', 'rep_short_name', 'rep_title', 'district', 'RCS\xa0#', 'Doc.', 'Vote', 'Result'], axis=1)
+
+            return pd_table.to_dict(orient='records')
+
 
     def get_session_chamber_rep_id(self, url):
         """
@@ -148,57 +108,16 @@ class VHRSpider(scrapy.Spider):
 
     def get_name_district(self, title):
         try:
-            short_name = re.search(self.NAME_PATTERN, title).group(1)
-            district = re.search(self.DISTRICT_PATTERN, title).group(1)
+            match_name_district = re.match(self.NAME_DISTRICT_PATTERN, title)
+            name_title = match_name_district.group(1).strip()
+            short_name = match_name_district.group(2).strip()
+            district = match_name_district.group(3).strip()
         except:
-            #If there is no voter data available, fill with empty strings
-            title = ''
-            short_name = ''
-            district = ''
-        return short_name, district
-
-    def process_row(self, row, url, title):
-        pass
-
-    def get_doc_num_href(self, row):
-        # If doc has a len greater than 1, then text is present. If so, grab name and url.
-        try:
-            doc_num = row.xpath("td[2]/a/text()").extract_first()
-            doc_href = ''
-            if len(doc_num) > 0:
-                doc_num = doc_num[0].replace(" ", "")
-                doc_href = self.base_url + row.xpath("td[2]/a/@href").extract_first()
-        except:
-            doc_href = ''
-            doc_num = ''
-        return doc_href, doc_num
-
-    def get_reading_motion(self, subject_motion):
-        reading = 1
-        motion = ''
-        motion_name = ''
-
-        #If subject is multiple lines, then process second line. First line is the subject
-        if len(subject_motion) > 1:
-
-            #find number of readings. Search doesn't have a len. If it fails finding reading, reading = 1
-            try:
-                reading_search = re.search(self.READING_PATTERN, subject_motion[1]).group(0)
-                if reading_search in self.readings:
-                    reading = self.readings[reading_search]
-            except:
-                reading = 1
-            try:
-                motion = re.search(self.MOTION_PATTERN, subject_motion[1]).group(0)
-            except:
-                motion = ''
-
-            try:
-                motion_name = re.search(self.MOTION_NAME_PATTERN, subject_motion[1]).group(0)
-            except:
-                motion_name = ''
-        return reading, motion, motion_name
-
+            #If there is no voter data available, fill with empty strings		
+            name_title = ''		
+            short_name = ''		
+            district = ''		
+        return name_title, short_name, district
 
     def save_results(self, session_id):
         import csv
